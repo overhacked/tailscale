@@ -99,6 +99,11 @@ type Knobs struct {
 	// We began creating this rule on 2024-06-14, and this knob
 	// allows us to disable the new behavior remotely if needed.
 	DisableLocalDNSOverrideViaNRPT atomic.Bool
+
+	// CaptivePortalDetection is whether the node should perform captive portal detection
+	// automatically when the network state changes, putting the associated Warnable in
+	// an unhealthy state when a captive portal is detected.
+	CaptivePortalDetection atomic.Bool
 }
 
 // UpdateFromNodeAttributes updates k (if non-nil) based on the provided self
@@ -127,6 +132,7 @@ func (k *Knobs) UpdateFromNodeAttributes(capMap tailcfg.NodeCapMap) {
 		userDialUseRoutes                    = has(tailcfg.NodeAttrUserDialUseRoutes)
 		disableSplitDNSWhenNoCustomResolvers = has(tailcfg.NodeAttrDisableSplitDNSWhenNoCustomResolvers)
 		disableLocalDNSOverrideViaNRPT       = has(tailcfg.NodeAttrDisableLocalDNSOverrideViaNRPT)
+		captivePortalDetection               = has(tailcfg.NodeAttrCaptivePortalDetection)
 	)
 
 	if has(tailcfg.NodeAttrOneCGNATEnable) {
@@ -153,6 +159,7 @@ func (k *Knobs) UpdateFromNodeAttributes(capMap tailcfg.NodeCapMap) {
 	k.UserDialUseRoutes.Store(userDialUseRoutes)
 	k.DisableSplitDNSWhenNoCustomResolvers.Store(disableSplitDNSWhenNoCustomResolvers)
 	k.DisableLocalDNSOverrideViaNRPT.Store(disableLocalDNSOverrideViaNRPT)
+	k.CaptivePortalDetection.Store(captivePortalDetection)
 }
 
 // AsDebugJSON returns k as something that can be marshalled with json.Marshal
@@ -180,5 +187,6 @@ func (k *Knobs) AsDebugJSON() map[string]any {
 		"UserDialUseRoutes":                    k.UserDialUseRoutes.Load(),
 		"DisableSplitDNSWhenNoCustomResolvers": k.DisableSplitDNSWhenNoCustomResolvers.Load(),
 		"DisableLocalDNSOverrideViaNRPT":       k.DisableLocalDNSOverrideViaNRPT.Load(),
+		"CaptivePortalDetection":               k.CaptivePortalDetection.Load(),
 	}
 }

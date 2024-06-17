@@ -57,6 +57,7 @@ import (
 	"tailscale.com/ipn/policy"
 	"tailscale.com/log/sockstatlog"
 	"tailscale.com/logpolicy"
+	"tailscale.com/net/captivedetection"
 	"tailscale.com/net/dns"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/dnsfallback"
@@ -662,6 +663,12 @@ func (b *LocalBackend) linkChange(delta *netmon.ChangeDelta) {
 	// need updating to tweak default routes.
 	b.updateFilterLocked(b.netMap, b.pm.CurrentPrefs())
 	updateExitNodeUsageWarning(b.pm.CurrentPrefs(), delta.New, b.health)
+
+	// Upon any link change, wait three seconds for things to settle, then asynchronously run
+	// captive portal detection.
+	time.AfterFunc(3*time.Second, func() {
+		b.performCaptiveDetection()
+	})
 
 	if peerAPIListenAsync && b.netMap != nil && b.state == ipn.Running {
 		want := b.netMap.GetAddresses().Len()
@@ -2044,6 +2051,40 @@ func (b *LocalBackend) updateFilterLocked(netMap *netmap.NetworkMap, prefs ipn.P
 
 	if b.sshServer != nil {
 		go b.sshServer.OnPolicyChange()
+	}
+}
+
+// captivePortalWarnable is a Warnable which is set to an unhealthy state when a captive portal is detected.
+var captivePortalWarnable = health.Register(&health.Warnable{
+	Code:  "captive-portal-detected",
+	Title: "Captive portal detected",
+	// High severity, because captive portals blocks all traffic and require user intervention.
+	Severity:            health.SeverityHigh,
+	Text:                health.StaticMessage("This Wi-Fi network requires you to log in manually."),
+	ImpactsConnectivity: true,
+})
+
+// performCaptiveDetection checks if captive portal detection is enabled via controlknob. If so, it runs
+// the detection and updates the Warnable accordingly.
+func (b *LocalBackend) performCaptiveDetection() {
+	captiveDetectionEnabledByControlKnob := b.ControlKnobs().CaptivePortalDetection.Load()
+	if !captiveDetectionEnabledByControlKnob {
+		return
+	}
+
+	d := captivedetection.NewDetector()
+	var dm *tailcfg.DERPMap
+	b.mu.Lock()
+	if b.netMap != nil {
+		dm = b.netMap.DERPMap
+	}
+	b.mu.Unlock()
+	ifst := b.NetMon().InterfaceState()
+	found := d.DetectCaptivePortal(ifst, dm, 0, b.logf)
+	if found {
+		b.health.SetUnhealthy(captivePortalWarnable, health.Args{})
+	} else {
+		b.health.SetHealthy(captivePortalWarnable)
 	}
 }
 

@@ -142,6 +142,7 @@ type CapabilityVersion int
 //   - 99: 2024-06-14: Client understands NodeAttrDisableLocalDNSOverrideViaNRPT
 //   - 100: 2024-06-18: Client supports filtertype.Match.SrcCaps (issue #12542)
 //   - 101: 2024-07-01: Client supports SSH agent forwarding when handling connections with /bin/su
+//   - 102: 2024-07-04: Client supports NodeAttrCaptivePortalDetection
 const CurrentCapabilityVersion CapabilityVersion = 101
 
 type StableID string
@@ -2321,6 +2322,11 @@ const (
 	// We began creating this rule on 2024-06-14, and this node attribute
 	// allows us to disable the new behavior remotely if needed.
 	NodeAttrDisableLocalDNSOverrideViaNRPT NodeCapability = "disable-local-dns-override-via-nrpt"
+
+	// NodeAttrCaptivePortalDetection instructs the client to perform captive portal detection
+	// automatically when the network state changes, putting the associated Warnable in an unhealthy
+	// state if a captive portal is detected.
+	NodeAttrCaptivePortalDetection NodeCapability = "captive-portal-detection"
 )
 
 // SetDNSRequest is a request to add a DNS record.
