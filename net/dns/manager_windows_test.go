@@ -516,6 +516,15 @@ func genRandomSubdomains(t *testing.T, n int) []dnsname.FQDN {
 	return domains
 }
 
+var (
+	libUserenv                   = windows.NewLazySystemDLL("userenv.dll")
+	procRefreshPolicyEx          = libUserenv.NewProc("RefreshPolicyEx")
+	procRegisterGPNotification   = libUserenv.NewProc("RegisterGPNotification")
+	procUnregisterGPNotification = libUserenv.NewProc("UnregisterGPNotification")
+)
+
+const _RP_FORCE = 1 // Flag for RefreshPolicyEx
+
 func testDoRefresh() (err error) {
 	r, _, e := procRefreshPolicyEx.Call(uintptr(1), uintptr(_RP_FORCE))
 	if r == 0 {
