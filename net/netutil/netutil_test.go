@@ -59,7 +59,7 @@ func TestIPForwardingEnabledLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("skipping on %s", runtime.GOOS)
 	}
-	got, err := ipForwardingEnabledLinux(ipv4, "some-not-found-interface")
+	got, err := ipForwardingEnabled(ipv4, "some-not-found-interface")
 	if err != nil {
 		t.Fatal(err)
 	}
