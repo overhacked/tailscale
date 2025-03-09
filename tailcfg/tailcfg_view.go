@@ -124,6 +124,16 @@ func (v *NodeView) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// GetSSHHostKeys returns the node's SSH host keys, or the zero value
+// if Hostinfo is invalid.
+func (v *NodeView) GetSSHHostKeys() views.Slice[string] {
+	var zero views.Slice[string]
+	if !v.Hostinfo().Valid() {
+		return zero
+	}
+	return v.Hostinfo().SSH_HostKeys()
+}
+
 func (v NodeView) ID() NodeID             { return v.ж.ID }
 func (v NodeView) StableID() StableNodeID { return v.ж.StableID }
 func (v NodeView) Name() string           { return v.ж.Name }

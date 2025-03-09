@@ -62,25 +62,23 @@ func TestCompileHostEntries(t *testing.T) {
 		{
 			name: "no-search-domains",
 			cfg: Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"a.b.c.": {netip.MustParseAddr("1.1.1.1")},
-				},
+				Hosts: hosts("a.b.c.", "1.1.1.1"),
 			},
 		},
 		{
 			name: "search-domains",
 			cfg: Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"a.foo.ts.net.":             {netip.MustParseAddr("1.1.1.1")},
-					"b.foo.ts.net.":             {netip.MustParseAddr("1.1.1.2")},
-					"c.foo.ts.net.":             {netip.MustParseAddr("1.1.1.3")},
-					"d.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.4")},
-					"d.foo.ts.net.":             {netip.MustParseAddr("1.1.1.4")},
-					"e.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.5")},
-					"random.example.com.":       {netip.MustParseAddr("1.1.1.1")},
-					"other.example.com.":        {netip.MustParseAddr("1.1.1.2")},
-					"othertoo.example.com.":     {netip.MustParseAddr("1.1.5.2")},
-				},
+				Hosts: hosts(
+					"a.foo.ts.net.", "1.1.1.1",
+					"b.foo.ts.net.", "1.1.1.2",
+					"c.foo.ts.net.", "1.1.1.3",
+					"d.foo.beta.tailscale.net.", "1.1.1.4",
+					"d.foo.ts.net.", "1.1.1.4",
+					"e.foo.beta.tailscale.net.", "1.1.1.5",
+					"random.example.com.", "1.1.1.1",
+					"other.example.com.", "1.1.1.2",
+					"othertoo.example.com.", "1.1.5.2",
+				),
 				SearchDomains: []dnsname.FQDN{"foo.ts.net.", "foo.beta.tailscale.net."},
 			},
 			want: []*HostEntry{
@@ -94,11 +92,11 @@ func TestCompileHostEntries(t *testing.T) {
 		{
 			name: "only-exact-subdomain-match",
 			cfg: Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"e.foo.ts.net.":                     {netip.MustParseAddr("1.1.1.5")},
-					"e.foo.beta.tailscale.net.":         {netip.MustParseAddr("1.1.1.5")},
-					"e.ignored.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.6")},
-				},
+				Hosts: hosts(
+					"e.foo.ts.net.", "1.1.1.5",
+					"e.foo.beta.tailscale.net.", "1.1.1.5",
+					"e.ignored.foo.beta.tailscale.net.", "1.1.1.6",
+				),
 				SearchDomains: []dnsname.FQDN{"foo.ts.net.", "foo.beta.tailscale.net."},
 			},
 			want: []*HostEntry{
@@ -108,13 +106,13 @@ func TestCompileHostEntries(t *testing.T) {
 		{
 			name: "unmatched-domains",
 			cfg: Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"d.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.4")},
-					"d.foo.ts.net.":             {netip.MustParseAddr("1.1.1.4")},
-					"random.example.com.":       {netip.MustParseAddr("1.1.1.1")},
-					"other.example.com.":        {netip.MustParseAddr("1.1.1.2")},
-					"othertoo.example.com.":     {netip.MustParseAddr("1.1.5.2")},
-				},
+				Hosts: hosts(
+					"d.foo.beta.tailscale.net.", "1.1.1.4",
+					"d.foo.ts.net.", "1.1.1.4",
+					"random.example.com.", "1.1.1.1",
+					"other.example.com.", "1.1.1.2",
+					"othertoo.example.com.", "1.1.5.2",
+				),
 				SearchDomains: []dnsname.FQDN{"foo.ts.net.", "foo.beta.tailscale.net."},
 			},
 			want: []*HostEntry{
@@ -124,13 +122,13 @@ func TestCompileHostEntries(t *testing.T) {
 		{
 			name: "overlaps",
 			cfg: Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"h1.foo.ts.net.":             {netip.MustParseAddr("1.1.1.3")},
-					"h1.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.2")},
-					"h2.foo.ts.net.":             {netip.MustParseAddr("1.1.1.1")},
-					"h2.foo.beta.tailscale.net.": {netip.MustParseAddr("1.1.1.1")},
-					"example.com":                {netip.MustParseAddr("1.1.1.1")},
-				},
+				Hosts: hosts(
+					"h1.foo.ts.net.", "1.1.1.3",
+					"h1.foo.beta.tailscale.net.", "1.1.1.2",
+					"h2.foo.ts.net.", "1.1.1.1",
+					"h2.foo.beta.tailscale.net.", "1.1.1.1",
+					"example.com", "1.1.1.1",
+				),
 				SearchDomains: []dnsname.FQDN{"foo.ts.net.", "foo.beta.tailscale.net."},
 			},
 			want: []*HostEntry{
@@ -968,15 +966,17 @@ func fqdns(strs ...string) (ret []dnsname.FQDN) {
 	return ret
 }
 
-func hosts(strs ...string) (ret map[dnsname.FQDN][]netip.Addr) {
+func hosts(strs ...string) (ret map[dnsname.FQDN]resolver.ResolverHost) {
 	var key dnsname.FQDN
-	ret = map[dnsname.FQDN][]netip.Addr{}
+	ret = map[dnsname.FQDN]resolver.ResolverHost{}
 	for _, s := range strs {
 		if ip, err := netip.ParseAddr(s); err == nil {
 			if key == "" {
 				panic("IP provided before name")
 			}
-			ret[key] = append(ret[key], ip)
+			host := ret[key]
+			host.IPs = append(host.IPs, ip)
+			ret[key] = host
 		} else {
 			fqdn, err := dnsname.ToFQDN(s)
 			if err != nil {

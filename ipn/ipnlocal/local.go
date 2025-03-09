@@ -65,6 +65,8 @@ import (
 	"tailscale.com/logpolicy"
 	"tailscale.com/net/captivedetection"
 	"tailscale.com/net/dns"
+	"tailscale.com/net/dns/resolver"
+	"tailscale.com/net/dns/resolver/sshfp"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/dnsfallback"
 	"tailscale.com/net/ipset"
@@ -4991,7 +4993,7 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 
 	dcfg := &dns.Config{
 		Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-		Hosts:  map[dnsname.FQDN][]netip.Addr{},
+		Hosts:  map[dnsname.FQDN]resolver.ResolverHost{},
 	}
 
 	// selfV6Only is whether we only have IPv6 addresses ourselves.
@@ -5004,7 +5006,7 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	// isn't configured to make MagicDNS resolution truly
 	// magic. Details in
 	// https://github.com/tailscale/tailscale/issues/1886.
-	set := func(name string, addrs views.Slice[netip.Prefix]) {
+	set := func(name string, addrs views.Slice[netip.Prefix], pubKeys views.Slice[string]) {
 		if addrs.Len() == 0 || name == "" {
 			return
 		}
@@ -5040,11 +5042,23 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 			}
 			ips = append(ips, addr.Addr())
 		}
-		dcfg.Hosts[fqdn] = ips
+		var sshfps []sshfp.SSHFP
+		for _, pubKey := range pubKeys.All() {
+			sshfpRR, err := sshfp.UnmarshalSSHPubKeyString(pubKey)
+			if err != nil {
+				logf("dnsConfigForNetmap: skipping public key, UnmarshalSSHPubKeyString(%q): %v", pubKey, err)
+				continue
+			}
+			sshfps = append(sshfps, sshfpRR)
+		}
+		dcfg.Hosts[fqdn] = resolver.ResolverHost{
+			IPs:    ips,
+			SSHFPs: sshfps,
+		}
 	}
-	set(nm.Name, nm.GetAddresses())
+	set(nm.Name, nm.GetAddresses(), nm.GetSSHHostKeys())
 	for _, peer := range peers {
-		set(peer.Name(), peer.Addresses())
+		set(peer.Name(), peer.Addresses(), peer.GetSSHHostKeys())
 	}
 	for _, rec := range nm.DNS.ExtraRecords {
 		switch rec.Type {
@@ -5063,7 +5077,11 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 		if err != nil {
 			continue
 		}
-		dcfg.Hosts[fqdn] = append(dcfg.Hosts[fqdn], ip)
+		if host, ok := dcfg.Hosts[fqdn]; ok {
+			host.IPs = append(host.IPs, ip)
+		} else {
+			dcfg.Hosts[fqdn] = resolver.ResolverHost{IPs: []netip.Addr{ip}}
+		}
 	}
 
 	if !prefs.CorpDNS() {

@@ -148,6 +148,16 @@ func (nm *NetworkMap) GetIPVIPServiceMap() IPServiceMappings {
 	return res
 }
 
+// GetSSHHostKeys returns the self node's SSH host keys, or the zero value
+// if SelfNode is invalid.
+func (nm *NetworkMap) GetSSHHostKeys() views.Slice[string] {
+	var zero views.Slice[string]
+	if !nm.SelfNode.Valid() || !nm.SelfNode.Hostinfo().Valid() {
+		return zero
+	}
+	return nm.SelfNode.Hostinfo().SSH_HostKeys()
+}
+
 // AnyPeersAdvertiseRoutes reports whether any peer is advertising non-exit node routes.
 func (nm *NetworkMap) AnyPeersAdvertiseRoutes() bool {
 	for _, p := range nm.Peers {

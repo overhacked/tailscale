@@ -41,7 +41,10 @@ type Config struct {
 	// Adding an entry to Hosts merely creates the record. If you want
 	// it to resolve, you also need to add appropriate routes to
 	// Routes.
-	Hosts map[dnsname.FQDN][]netip.Addr
+	Hosts map[dnsname.FQDN]resolver.ResolverHost
+	// SSHPubKeys maps DNS FQDNs to SSH public keys for Tailscale SSH,
+	// so they can be served as SSHFP records
+	SSHPubKeys map[dnsname.FQDN][]string
 	// OnlyIPv6, if true, uses the IPv6 service IP (for MagicDNS)
 	// instead of the IPv4 version (100.100.100.100).
 	OnlyIPv6 bool

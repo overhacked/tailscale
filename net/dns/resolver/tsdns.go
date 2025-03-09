@@ -27,6 +27,7 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/net/dns/resolvconffile"
+	"tailscale.com/net/dns/resolver/sshfp"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -73,7 +74,7 @@ type Config struct {
 	// To register a "default route", add an entry for ".".
 	Routes map[dnsname.FQDN][]*dnstype.Resolver
 	// LocalHosts is a map of FQDNs to corresponding IPs.
-	Hosts map[dnsname.FQDN][]netip.Addr
+	Hosts map[dnsname.FQDN]ResolverHost
 	// LocalDomains is a list of DNS name suffixes that should not be
 	// routed to upstream resolvers.
 	LocalDomains []dnsname.FQDN
@@ -195,6 +196,12 @@ func (c *Config) RoutesRequireNoCustomResolvers() bool {
 	return true
 }
 
+// ResolverHost is a container for data needed by the Resolver about nodes
+type ResolverHost struct {
+	IPs    []netip.Addr
+	SSHFPs []sshfp.SSHFP
+}
+
 // Resolver is a DNS resolver for nodes on the Tailscale network,
 // associating them with domain names of the form <mynode>.<mydomain>.<root>.
 // If it is asked to resolve a domain that is not of that form,
@@ -214,7 +221,7 @@ type Resolver struct {
 	// mu guards the following fields from being updated while used.
 	mu           sync.Mutex
 	localDomains []dnsname.FQDN
-	hostToIP     map[dnsname.FQDN][]netip.Addr
+	hosts        map[dnsname.FQDN]ResolverHost
 	ipToHost     map[netip.Addr]dnsname.FQDN
 }
 
@@ -242,7 +249,7 @@ func New(logf logger.Logf, linkSel ForwardLinkSelector, dialer *tsdial.Dialer, h
 		logf:     logger.WithPrefix(logf, "resolver: "),
 		netMon:   netMon,
 		closed:   make(chan struct{}),
-		hostToIP: map[dnsname.FQDN][]netip.Addr{},
+		hosts:    map[dnsname.FQDN]ResolverHost{},
 		ipToHost: map[netip.Addr]dnsname.FQDN{},
 		dialer:   dialer,
 		health:   health,
@@ -267,11 +274,11 @@ func (r *Resolver) SetConfig(cfg Config) error {
 		r.saveConfigForTests(cfg)
 	}
 
-	reverse := make(map[netip.Addr]dnsname.FQDN, len(cfg.Hosts))
+	reverse := make(map[netip.Addr]dnsname.FQDN, len(cfg.Hosts)*2)
 
-	for host, ips := range cfg.Hosts {
-		for _, ip := range ips {
-			reverse[ip] = host
+	for fqdn, host := range cfg.Hosts {
+		for _, ip := range host.IPs {
+			reverse[ip] = fqdn
 		}
 	}
 
@@ -280,7 +287,7 @@ func (r *Resolver) SetConfig(cfg Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localDomains = cfg.LocalDomains
-	r.hostToIP = cfg.Hosts
+	r.hosts = cfg.Hosts
 	r.ipToHost = reverse
 	return nil
 }
@@ -604,12 +611,24 @@ func stubResolverForOS() (ip netip.Addr, err error) {
 // typ (A, AAAA, ALL).
 // Returns dns.RCodeRefused to indicate that the local map is not
 // authoritative for domain.
-func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, dns.RCode) {
+func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type, resp *response) *response {
 	metricDNSResolveLocal.Add(1)
+
+	respondWithCode := func(code dns.RCode) *response {
+		resp.Header.RCode = code
+		return resp
+	}
+
+	respondWithIP := func(addr netip.Addr) *response {
+		resp.Header.RCode = dns.RCodeSuccess
+		resp.IP = addr
+		return resp
+	}
+
 	// Reject .onion domains per RFC 7686.
 	if dnsname.HasSuffix(domain.WithoutTrailingDot(), ".onion") {
 		metricDNSResolveLocalErrorOnion.Add(1)
-		return netip.Addr{}, dns.RCodeNameError
+		return respondWithCode(dns.RCodeNameError)
 	}
 
 	// We return a symbolic domain if someone does a reverse lookup on the
@@ -618,33 +637,33 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	if domain == dnsSymbolicFQDN {
 		switch typ {
 		case dns.TypeA:
-			return tsaddr.TailscaleServiceIP(), dns.RCodeSuccess
+			return respondWithIP(tsaddr.TailscaleServiceIP())
 		case dns.TypeAAAA:
-			return tsaddr.TailscaleServiceIPv6(), dns.RCodeSuccess
+			return respondWithIP(tsaddr.TailscaleServiceIPv6())
 		}
 	}
 	// Special-case: 4via6 DNS names.
 	if ip, ok := r.resolveViaDomain(domain, typ); ok {
-		return ip, dns.RCodeSuccess
+		return respondWithIP(ip)
 	}
 
 	r.mu.Lock()
-	hosts := r.hostToIP
+	hosts := r.hosts
 	localDomains := r.localDomains
 	r.mu.Unlock()
 
-	addrs, found := hosts[domain]
+	hostInfo, found := hosts[domain]
 	if !found {
 		for _, suffix := range localDomains {
 			if suffix.Contains(domain) {
 				// We are authoritative for the queried domain.
 				metricDNSResolveLocalErrorMissing.Add(1)
-				return netip.Addr{}, dns.RCodeNameError
+				return respondWithCode(dns.RCodeNameError)
 			}
 		}
 		// Not authoritative, signal that forwarding is advisable.
 		metricDNSResolveLocalErrorRefused.Add(1)
-		return netip.Addr{}, dns.RCodeRefused
+		return respondWithCode(dns.RCodeRefused)
 	}
 
 	// Refactoring note: this must happen after we check suffixes,
@@ -655,40 +674,50 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	// RCodeSuccess with no data, not NXDOMAIN.
 	switch typ {
 	case dns.TypeA:
-		for _, ip := range addrs {
+		for _, ip := range hostInfo.IPs {
 			if ip.Is4() {
 				metricDNSResolveLocalOKA.Add(1)
-				return ip, dns.RCodeSuccess
+				return respondWithIP(ip)
 			}
 		}
 		metricDNSResolveLocalNoA.Add(1)
-		return netip.Addr{}, dns.RCodeSuccess
+		return respondWithCode(dns.RCodeSuccess)
 	case dns.TypeAAAA:
-		for _, ip := range addrs {
+		for _, ip := range hostInfo.IPs {
 			if ip.Is6() {
 				metricDNSResolveLocalOKAAAA.Add(1)
-				return ip, dns.RCodeSuccess
+				return respondWithIP(ip)
 			}
 		}
 		metricDNSResolveLocalNoAAAA.Add(1)
-		return netip.Addr{}, dns.RCodeSuccess
+		return respondWithCode(dns.RCodeSuccess)
+	case sshfp.TypeSSHFP:
+		if len(hostInfo.SSHFPs) > 0 {
+			for _, sshfpRR := range hostInfo.SSHFPs {
+				resp.SSHFPs = append(resp.SSHFPs, sshfpRR)
+			}
+			metricDNSResolveLocalOKSSHFP.Add(1)
+		} else {
+			metricDNSResolveLocalNoSSHFP.Add(1)
+		}
+		return respondWithCode(dns.RCodeSuccess)
 	case dns.TypeALL:
 		// Answer with whatever we've got.
 		// It could be IPv4, IPv6, or a zero addr.
 		// TODO: Return all available resolutions (A and AAAA, if we have them).
-		if len(addrs) == 0 {
+		if len(hostInfo.IPs) == 0 {
 			metricDNSResolveLocalNoAll.Add(1)
-			return netip.Addr{}, dns.RCodeSuccess
+			return respondWithCode(dns.RCodeSuccess)
 		}
 		metricDNSResolveLocalOKAll.Add(1)
-		return addrs[0], dns.RCodeSuccess
+		return respondWithIP(hostInfo.IPs[0])
 
 	// Leave some record types explicitly unimplemented.
 	// These types relate to recursive resolution or special
 	// DNS semantics and might be implemented in the future.
 	case dns.TypeNS, dns.TypeSOA, dns.TypeAXFR, dns.TypeHINFO:
 		metricDNSResolveNotImplType.Add(1)
-		return netip.Addr{}, dns.RCodeNotImplemented
+		return respondWithCode(dns.RCodeNotImplemented)
 
 	// For everything except for the few types above that are explicitly not implemented, return no records.
 	// This is what other DNS systems do: always return NOERROR
@@ -699,7 +728,7 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	default:
 		metricDNSResolveNoRecordType.Add(1)
 		// The name exists, but no records exist of the requested type.
-		return netip.Addr{}, dns.RCodeSuccess
+		return respondWithCode(dns.RCodeSuccess)
 	}
 }
 
@@ -863,6 +892,9 @@ type response struct {
 	// TXT is the response to a TXT query.
 	// Each one is its own RR with one string.
 	TXT []string
+
+	// SSHFPs are the responses to a SSHFP query.
+	SSHFPs []sshfp.SSHFP
 
 	// CNAME is the response to a CNAME query.
 	CNAME string
@@ -1053,6 +1085,28 @@ func marshalSRV(queryName dns.Name, srvs []*net.SRV, builder *dns.Builder) error
 	return nil
 }
 
+func marshalSSHFPResponse(queryName dns.Name, fps []sshfp.SSHFP, builder *dns.Builder) error {
+	for _, fp := range fps {
+		encodedFP, err := sshfp.MarshalSSHFPResourceRecord(fp)
+		if err != nil {
+			return err
+		}
+		err = builder.UnknownResource(dns.ResourceHeader{
+			Name:  queryName,
+			Type:  sshfp.TypeSSHFP,
+			Class: dns.ClassINET,
+			TTL:   uint32(defaultTTL / time.Second),
+		}, dns.UnknownResource{
+			Type: sshfp.TypeSSHFP,
+			Data: encodedFP,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // marshalResponse serializes the DNS response into a new buffer.
 func marshalResponse(resp *response) ([]byte, error) {
 	resp.Header.Response = true
@@ -1113,6 +1167,8 @@ func marshalResponse(resp *response) ([]byte, error) {
 		err = marshalCNAME(resp.Question.Name, resp.CNAME, &builder)
 	case dns.TypeSRV:
 		err = marshalSRV(resp.Question.Name, resp.SRVs, &builder)
+	case sshfp.TypeSSHFP:
+		err = marshalSSHFPResponse(resp.Question.Name, resp.SSHFPs, &builder)
 	case dns.TypeNS:
 		err = marshalNS(resp.Question.Name, resp.NSs, &builder)
 	}
@@ -1293,16 +1349,13 @@ func (r *Resolver) respond(query []byte) ([]byte, error) {
 		return r.respondReverse(query, name, parser.response())
 	}
 
-	ip, rcode := r.resolveLocal(name, parser.Question.Type)
-	if rcode == dns.RCodeRefused {
+	localResponse := r.resolveLocal(name, parser.Question.Type, parser.response())
+	if localResponse.Header.RCode == dns.RCodeRefused {
 		return nil, errNotOurName // sentinel error return value: it requests forwarding
 	}
 
-	resp := parser.response()
-	resp.Header.RCode = rcode
-	resp.IP = ip
 	metricDNSMagicDNSSuccessName.Add(1)
-	return marshalResponse(resp)
+	return marshalResponse(localResponse)
 }
 
 // unARPA maps from "4.4.8.8.in-addr.arpa." to "8.8.4.4", etc.
@@ -1390,9 +1443,11 @@ var (
 	metricDNSResolveLocalErrorRefused = clientmetric.NewCounter("dns_resolve_local_error_refused")
 	metricDNSResolveLocalOKA          = clientmetric.NewCounter("dns_resolve_local_ok_a")
 	metricDNSResolveLocalOKAAAA       = clientmetric.NewCounter("dns_resolve_local_ok_aaaa")
+	metricDNSResolveLocalOKSSHFP      = clientmetric.NewCounter("dns_resolve_local_ok_sshfp")
 	metricDNSResolveLocalOKAll        = clientmetric.NewCounter("dns_resolve_local_ok_all")
 	metricDNSResolveLocalNoA          = clientmetric.NewCounter("dns_resolve_local_no_a")
 	metricDNSResolveLocalNoAAAA       = clientmetric.NewCounter("dns_resolve_local_no_aaaa")
+	metricDNSResolveLocalNoSSHFP      = clientmetric.NewCounter("dns_resolve_local_no_sshfp")
 	metricDNSResolveLocalNoAll        = clientmetric.NewCounter("dns_resolve_local_no_all")
 	metricDNSResolveNotImplType       = clientmetric.NewCounter("dns_resolve_local_not_impl_type")
 	metricDNSResolveNoRecordType      = clientmetric.NewCounter("dns_resolve_local_no_record_type")

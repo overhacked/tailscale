@@ -175,7 +175,7 @@ func compileHostEntries(cfg Config) (hosts []*HostEntry) {
 	didLabel := make(map[string]bool, len(cfg.Hosts))
 	hostsMap := make(map[netip.Addr]*HostEntry, len(cfg.Hosts))
 	for _, sd := range cfg.SearchDomains {
-		for h, ips := range cfg.Hosts {
+		for h, host := range cfg.Hosts {
 			if !sd.Contains(h) || h.NumLabels() != (sd.NumLabels()+1) {
 				continue
 			}
@@ -184,7 +184,7 @@ func compileHostEntries(cfg Config) (hosts []*HostEntry) {
 				didLabel[label] = true
 				ipHosts = append(ipHosts, label)
 			}
-			for _, ip := range ips {
+			for _, ip := range host.IPs {
 				if cfg.OnlyIPv6 && ip.Is4() {
 					continue
 				}

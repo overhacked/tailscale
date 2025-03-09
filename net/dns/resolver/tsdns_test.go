@@ -24,6 +24,7 @@ import (
 	miekdns "github.com/miekg/dns"
 	dns "golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/health"
+	"tailscale.com/net/dns/resolver/sshfp"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsdial"
@@ -39,14 +40,72 @@ var (
 
 	testipv4Arpa = dnsname.FQDN("4.3.2.1.in-addr.arpa.")
 	testipv6Arpa = dnsname.FQDN("f.0.e.0.d.0.c.0.b.0.a.0.9.0.8.0.7.0.6.0.5.0.4.0.3.0.2.0.1.0.0.0.ip6.arpa.")
+
+	// Example public keys taken from RFC6594 and RFC7479
+	// Fingerprints generated with ssh-keygen -O hashalg=sha256 -r
+	testPubKeyRSA                  = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDCUR4JOhxTinzq7QO3bQXW4jmPCCulFsnh8Yi7MKwpMnd96+T7uV7nEwy+6+GWYu98IxFJByIjFXX/a6BXDp3878wezH1DZ2tND/tu/eudz6ErpTFYmnVLyEDARYSzVBNQuIK1UDqvvB6KffJcyt78FpwW27euGkqEkam7GaurPRAgwXehDB/gMwRtXVRZ+13zYWkAmAY+5OAWVmdXuQVm5kjlvcNzto2H3m3nqJtD4J9L1lKPuSVVqwJr4/6hibXJkQEvWpUvdOAUw3frKpNwa932fXFk3ke4rsDjQ/W8GyleMtK3Tx8tE4z1wuowXtYe6Ba8q3LAPs/m2S4pUscx"
+	testPubKeyRSAFingerprintSHA256 = sshfp.SSHFP{
+		Algorithm:   sshfp.AlgorithmRSA,
+		Type:        sshfp.TypeSHA256,
+		FingerPrint: mustDecodeHexString("b049f950d1397b8fee6a61e4d14a9acdc4721e084eff5460bbed80cfaa2ce2cb"),
+	}
+	testPubKeyECDSA                  = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAD+9COUiX7WYgcvIOdI8+djdoFDVUTxNrcog8sSYdbIzeG+bYdsssvcyy/nRfVhXC5QBCk8IThqs7D4/lFxX5g="
+	testPubKeyECDSAFingerprintSHA256 = sshfp.SSHFP{
+		Algorithm:   sshfp.AlgorithmECDSA,
+		Type:        sshfp.TypeSHA256,
+		FingerPrint: mustDecodeHexString("821eb6c1c98d9cc827ab7f456304c0f14785b7008d9e8646a8519de80849afc7"),
+	}
+	testPubKeyED25519                  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGPKSUTyz1HwHReFVvD5obVsALAgJRNarH4TRpNePnAS"
+	testPubKeyED25519FingerprintSHA256 = sshfp.SSHFP{
+		Algorithm:   sshfp.AlgorithmEd25519,
+		Type:        sshfp.TypeSHA256,
+		FingerPrint: mustDecodeHexString("a87f1b687ac0e57d2a081a2f282672334d90ed316d2b818ca9580ea384d92401"),
+	}
 )
 
 var dnsCfg = Config{
-	Hosts: map[dnsname.FQDN][]netip.Addr{
-		"test1.ipn.dev.": {testipv4},
-		"test2.ipn.dev.": {testipv6},
-	},
+	Hosts: hosts(
+		"test1.ipn.dev.", testipv4.String(), testPubKeyRSA, testPubKeyECDSA, testPubKeyED25519,
+		"test2.ipn.dev.", testipv6.String(),
+	),
 	LocalDomains: []dnsname.FQDN{"ipn.dev.", "3.2.1.in-addr.arpa.", "1.0.0.0.ip6.arpa."},
+}
+
+func hosts(strs ...string) (ret map[dnsname.FQDN]ResolverHost) {
+	var key dnsname.FQDN
+	ret = map[dnsname.FQDN]ResolverHost{}
+	for _, s := range strs {
+		if ip, err := netip.ParseAddr(s); err == nil {
+			if key == "" {
+				panic("IP provided before name")
+			}
+			host := ret[key]
+			host.IPs = append(host.IPs, ip)
+			ret[key] = host
+		} else if rr, err := sshfp.UnmarshalSSHPubKeyString(s); err == nil {
+			if key == "" {
+				panic("SSH public key provided before name")
+			}
+			host := ret[key]
+			host.SSHFPs = append(host.SSHFPs, rr)
+			ret[key] = host
+		} else {
+			fqdn, err := dnsname.ToFQDN(s)
+			if err != nil {
+				panic(err)
+			}
+			key = fqdn
+		}
+	}
+	return ret
+}
+
+func mustDecodeHexString(s string) []byte {
+	out, err := hex.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return out
 }
 
 const noEdns = 0
@@ -413,13 +472,13 @@ func TestResolveLocal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ip, code := r.resolveLocal(tt.qname, tt.qtype)
-			if code != tt.code {
-				t.Errorf("code = %v; want %v", code, tt.code)
+			resp := r.resolveLocal(tt.qname, tt.qtype, &response{})
+			if resp.Header.RCode != tt.code {
+				t.Errorf("code = %v; want %v", resp.Header.RCode, tt.code)
 			}
 			// Only check ip for non-err
-			if ip != tt.ip {
-				t.Errorf("ip = %v; want %v", ip, tt.ip)
+			if resp.IP != tt.ip {
+				t.Errorf("ip = %v; want %v", resp.IP, tt.ip)
 			}
 		})
 	}
@@ -454,6 +513,52 @@ func TestResolveLocalReverse(t *testing.T) {
 			}
 			if name != tt.want {
 				t.Errorf("ip = %v; want %v", name, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveLocalSSHFP(t *testing.T) {
+	r := newResolver(t)
+	defer r.Close()
+
+	r.SetConfig(dnsCfg)
+
+	allPubKeys := []sshfp.SSHFP{testPubKeyRSAFingerprintSHA256, testPubKeyED25519FingerprintSHA256, testPubKeyECDSAFingerprintSHA256}
+	noPubKeys := []sshfp.SSHFP{}
+	tests := []struct {
+		name  string
+		qname dnsname.FQDN
+		qtype dns.Type
+		fps   []sshfp.SSHFP
+		code  dns.RCode
+	}{
+		{"sshfp", "test1.ipn.dev.", sshfp.TypeSSHFP, allPubKeys, dns.RCodeSuccess},
+		{"no-sshfp", "test2.ipn.dev.", sshfp.TypeSSHFP, noPubKeys, dns.RCodeSuccess},
+		{"nxdomain", "test3.ipn.dev.", sshfp.TypeSSHFP, noPubKeys, dns.RCodeNameError},
+		{"foreign domain", "google.com.", sshfp.TypeSSHFP, noPubKeys, dns.RCodeRefused},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := r.resolveLocal(tt.qname, tt.qtype, &response{})
+			if resp.Header.RCode != tt.code {
+				t.Errorf("code = %v; want %v", resp.Header.RCode, tt.code)
+			}
+			// Only check fps for non-err
+		wanted:
+			for _, wanted := range tt.fps {
+				for _, got := range resp.SSHFPs {
+					if wanted.Equals(&got) {
+						continue wanted
+					}
+				}
+				t.Errorf("resp.SSHFPs = %v; want %v", resp.SSHFPs, tt.fps)
+				return
+			}
+
+			if len(resp.SSHFPs) != len(tt.fps) {
+				t.Errorf("resp.SSHFPs = %v; want %v", resp.SSHFPs, tt.fps)
 			}
 		})
 	}
@@ -891,6 +996,39 @@ var ptrResponse6 = []byte{
 	0x05, 0x74, 0x65, 0x73, 0x74, 0x32, 0x03, 0x69, 0x70, 0x6e, 0x03, 0x64, 0x65, 0x76, 0x00,
 }
 
+var sshfpResponse = []byte{
+	0x00, 0x00, // transaction id: 0
+	0x84, 0x00, // flags: response, authoritative, no error
+	0x00, 0x01, // one question
+	0x00, 0x03, // three answers
+	0x00, 0x00, 0x00, 0x00, // no authority or additional RRs
+	// Question:
+	0x05, 0x74, 0x65, 0x73, 0x74, 0x31, 0x03, 0x69, 0x70, 0x6e, 0x03, 0x64, 0x65, 0x76, 0x00, // name
+	0x00, 0x2c, 0x00, 0x01, // type SSHFP, class IN
+	// Answer:
+	0x05, 0x74, 0x65, 0x73, 0x74, 0x31, 0x03, 0x69, 0x70, 0x6e, 0x03, 0x64, 0x65, 0x76, 0x00, // name
+	0x00, 0x2c, 0x00, 0x01, // type SSHFP, class IN
+	0x00, 0x00, 0x02, 0x58, // TTL = 600
+	0x00, 0x22, // RDATA len = 34
+	0x01,                                                                                                                                                                                           // Fingerprint Key Algorithm (RSA)
+	0x02,                                                                                                                                                                                           // Fingerprint Hash
+	0xb0, 0x49, 0xf9, 0x50, 0xd1, 0x39, 0x7b, 0x8f, 0xee, 0x6a, 0x61, 0xe4, 0xd1, 0x4a, 0x9a, 0xcd, 0xc4, 0x72, 0x1e, 0x08, 0x4e, 0xff, 0x54, 0x60, 0xbb, 0xed, 0x80, 0xcf, 0xaa, 0x2c, 0xe2, 0xcb, // Fingerprint
+	0x05, 0x74, 0x65, 0x73, 0x74, 0x31, 0x03, 0x69, 0x70, 0x6e, 0x03, 0x64, 0x65, 0x76, 0x00, // name
+	0x00, 0x2c, 0x00, 0x01, // type SSHFP, class IN
+	0x00, 0x00, 0x02, 0x58, // TTL = 600
+	0x00, 0x22, // RDATA len = 34
+	0x03,                                                                                                                                                                                           // Fingerprint Key Algorithm (ECDSA)
+	0x02,                                                                                                                                                                                           // Fingerprint Hash
+	0x82, 0x1e, 0xb6, 0xc1, 0xc9, 0x8d, 0x9c, 0xc8, 0x27, 0xab, 0x7f, 0x45, 0x63, 0x04, 0xc0, 0xf1, 0x47, 0x85, 0xb7, 0x00, 0x8d, 0x9e, 0x86, 0x46, 0xa8, 0x51, 0x9d, 0xe8, 0x08, 0x49, 0xaf, 0xc7, // Fingerprint
+	0x05, 0x74, 0x65, 0x73, 0x74, 0x31, 0x03, 0x69, 0x70, 0x6e, 0x03, 0x64, 0x65, 0x76, 0x00, // name
+	0x00, 0x2c, 0x00, 0x01, // type SSHFP, class IN
+	0x00, 0x00, 0x02, 0x58, // TTL = 600
+	0x00, 0x22, // RDATA len = 34
+	0x04,                                                                                                                                                                                           // Fingerprint Key Algorithm (Ed25519)
+	0x02,                                                                                                                                                                                           // Fingerprint Hash
+	0xa8, 0x7f, 0x1b, 0x68, 0x7a, 0xc0, 0xe5, 0x7d, 0x2a, 0x08, 0x1a, 0x2f, 0x28, 0x26, 0x72, 0x33, 0x4d, 0x90, 0xed, 0x31, 0x6d, 0x2b, 0x81, 0x8c, 0xa9, 0x58, 0x0e, 0xa3, 0x84, 0xd9, 0x24, 0x01, // Fingerprint
+}
+
 var nxdomainResponse = []byte{
 	0x00, 0x00, // transaction id: 0
 	0x84, 0x03, // flags: response, authoritative, error: nxdomain
@@ -929,6 +1067,7 @@ func TestFull(t *testing.T) {
 		{"ipv4", dnspacket("test1.ipn.dev.", dns.TypeA, noEdns), ipv4Response},
 		{"ipv6", dnspacket("test2.ipn.dev.", dns.TypeAAAA, noEdns), ipv6Response},
 		{"no-ipv6", dnspacket("test1.ipn.dev.", dns.TypeAAAA, noEdns), emptyResponse},
+		{"sshfp", dnspacket("test1.ipn.dev.", sshfp.TypeSSHFP, noEdns), sshfpResponse},
 		{"upper", dnspacket("TEST1.IPN.DEV.", dns.TypeA, noEdns), ipv4UppercaseResponse},
 		{"ptr4", dnspacket("4.3.2.1.in-addr.arpa.", dns.TypePTR, noEdns), ptrResponse},
 		{"ptr6", dnspacket("f.0.e.0.d.0.c.0.b.0.a.0.9.0.8.0.7.0.6.0.5.0.4.0.3.0.2.0.1.0.0.0.ip6.arpa.",

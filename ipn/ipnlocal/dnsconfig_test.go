@@ -12,6 +12,7 @@ import (
 
 	"tailscale.com/ipn"
 	"tailscale.com/net/dns"
+	"tailscale.com/net/dns/resolver"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstest"
 	"tailscale.com/types/dnstype"
@@ -31,11 +32,26 @@ func ipps(ippStrs ...string) (ipps []netip.Prefix) {
 	return
 }
 
-func ips(ss ...string) (ips []netip.Addr) {
-	for _, s := range ss {
-		ips = append(ips, netip.MustParseAddr(s))
+func hosts(strs ...string) (ret map[dnsname.FQDN]resolver.ResolverHost) {
+	var key dnsname.FQDN
+	ret = map[dnsname.FQDN]resolver.ResolverHost{}
+	for _, s := range strs {
+		if ip, err := netip.ParseAddr(s); err == nil {
+			if key == "" {
+				panic("IP provided before name")
+			}
+			host := ret[key]
+			host.IPs = append(host.IPs, ip)
+			ret[key] = host
+		} else {
+			fqdn, err := dnsname.ToFQDN(s)
+			if err != nil {
+				panic(err)
+			}
+			key = fqdn
+		}
 	}
-	return
+	return ret
 }
 
 func nodeViews(v []*tailcfg.Node) []tailcfg.NodeView {
@@ -64,7 +80,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			prefs: &ipn.Prefs{},
 			want: &dns.Config{
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
+				Hosts:  map[dnsname.FQDN]resolver.ResolverHost{},
 			},
 		},
 		{
@@ -95,12 +111,12 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			prefs: &ipn.Prefs{},
 			want: &dns.Config{
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"b.net.":       ips("100.102.0.1", "100.102.0.2"),
-					"myname.net.":  ips("100.101.101.101"),
-					"peera.net.":   ips("100.102.0.1", "100.102.0.2"),
-					"v6-only.net.": ips("fe75::3"),
-				},
+				Hosts: hosts(
+					"b.net.", "100.102.0.1", "100.102.0.2",
+					"myname.net.", "100.101.101.101",
+					"peera.net.", "100.102.0.1", "100.102.0.2",
+					"v6-only.net.", "fe75::3",
+				),
 			},
 		},
 		{
@@ -135,12 +151,12 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			want: &dns.Config{
 				OnlyIPv6: true,
 				Routes:   map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"b.net.":       ips("fe75::2"),
-					"myname.net.":  ips("fe75::1"),
-					"peera.net.":   ips("fe75::1001"),
-					"v6-only.net.": ips("fe75::3"),
-				},
+				Hosts: hosts(
+					"b.net.", "fe75::2",
+					"myname.net.", "fe75::1",
+					"peera.net.", "fe75::1001",
+					"v6-only.net.", "fe75::3",
+				),
 			},
 		},
 		{
@@ -161,11 +177,11 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			prefs: &ipn.Prefs{},
 			want: &dns.Config{
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"myname.net.": ips("100.101.101.101"),
-					"foo.com.":    ips("1.2.3.4"),
-					"bar.com.":    ips("1::6"),
-				},
+				Hosts: hosts(
+					"myname.net.", "100.101.101.101",
+					"foo.com.", "1.2.3.4",
+					"bar.com.", "1::6",
+				),
 			},
 		},
 		{
@@ -181,7 +197,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{},
+				Hosts: map[dnsname.FQDN]resolver.ResolverHost{},
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{
 					"0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa.": nil,
 					"100.100.in-addr.arpa.":             nil,
@@ -281,7 +297,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{},
+				Hosts: map[dnsname.FQDN]resolver.ResolverHost{},
 				DefaultResolvers: []*dnstype.Resolver{
 					{Addr: "8.8.8.8"},
 				},
@@ -304,7 +320,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				ExitNodeID: "some-id",
 			},
 			want: &dns.Config{
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
+				Hosts:  map[dnsname.FQDN]resolver.ResolverHost{},
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
 				DefaultResolvers: []*dnstype.Resolver{
 					{Addr: "8.8.4.4"},
@@ -324,7 +340,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
+				Hosts:  map[dnsname.FQDN]resolver.ResolverHost{},
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
 			},
 		},
