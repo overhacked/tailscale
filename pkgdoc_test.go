@@ -26,6 +26,9 @@ func TestPackageDocs(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		if path == ".git" {
+			return filepath.SkipDir
+		}
 		if fi.Mode().IsRegular() && strings.HasSuffix(path, ".go") {
 			if strings.HasSuffix(path, "_test.go") {
 				return nil
