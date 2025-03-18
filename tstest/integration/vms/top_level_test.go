@@ -122,3 +122,40 @@ func TestMITMProxy(t *testing.T) {
 		&expect.BExp{R: `IPv4: yes`},
 	})
 }
+
+func TestOpenSSHSSHFP(t *testing.T) {
+	t.Parallel()
+	setupTests(t)
+	distro := Distros[2] // nixos-21.11
+
+	if distroRex.Unwrap().MatchString(distro.Name) {
+		t.Logf("%s matches %s", distro.Name, distroRex.Unwrap())
+	} else {
+		t.Skip("regex not matched")
+	}
+
+	ctx, done := context.WithCancel(context.Background())
+	t.Cleanup(done)
+
+	h := newHarness(t)
+
+	// TODO: acquire ramsem for two VMs?
+	err := ramsem.sem.Acquire(ctx, int64(distro.MemoryMegs))
+	if err != nil {
+		t.Fatalf("can't acquire ram semaphore: %v", err)
+	}
+	t.Cleanup(func() { ramsem.sem.Release(int64(distro.MemoryMegs)) })
+
+	// TODO: create two VMs to communicate with each other
+	vm := h.mkVM(t, 2, distro, h.pubKey, h.loginServerURL, t.TempDir())
+	vm.waitStartup(t)
+
+	ipm := h.waitForIPMap(t, vm, distro)
+	_, cli := h.setupSSHShell(t, distro, ipm)
+
+	runTestCommands(t, 10*time.Second, cli, []expect.Batcher{
+		&expect.BSnd{S: "tailscale set --ssh=true\n"},
+		&expect.BSnd{S: "echo Success.\n"},
+		&expect.BExp{R: `Success.`},
+	})
+}
