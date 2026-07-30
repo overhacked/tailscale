@@ -167,26 +167,55 @@ func getPFMainRuleset() (scrubRules, natRules, filterRules string) {
 	return
 }
 
+// rulesetReferencesTables reports whether rules mention any pf table, e.g.
+// "<zabbix_proxies>". "pfctl -s rules" prints table names but never their
+// contents, so reloading such a ruleset without preserving table contents would
+// redefine those tables as empty and silently stop the rules matching.
+func rulesetReferencesTables(rules string) bool {
+	for _, line := range strings.Split(rules, "\n") {
+		if i := strings.IndexByte(line, '<'); i >= 0 && strings.IndexByte(line[i:], '>') > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // loadPFMainRuleset replaces the main PF ruleset with the given combined
 // NAT + filter rules.
+//
+// Reloading the main ruleset is inherently lossy: we reconstruct it from
+// "pfctl -s" output, which prints table names but never their contents, so any
+// table the ruleset references comes back empty. pfctl's "-T load" looks like it
+// would avoid this, but that command has never been implemented in FreeBSD's pf
+// (nor OpenBSD's) -- see FreeBSD bug 291318. Before FreeBSD 15.0 pfctl silently
+// ignored it; 15.0 tightened argument checking and rejects it outright. Either
+// way it preserves nothing, so we do not pass it.
+//
+// Because we cannot reload safely, refuse when the existing ruleset references
+// tables and tell the operator to declare the anchors statically in pf.conf,
+// where they survive reloads and tailscaled never has to touch the main ruleset.
 func loadPFMainRuleset(logf logger.Logf, rules string) error {
+	if rulesetReferencesTables(rules) {
+		return fmt.Errorf("refusing to reload the main PF ruleset: it references pf tables whose contents cannot be preserved across a reload; "+
+			"add 'nat-anchor \"%s\"' and 'anchor \"%s\"' to pf.conf instead", pfAnchorName, pfAnchorName)
+	}
 	bo := backoff.NewBackoff("pfctl", logf, 2*time.Second)
 	var retries int
 	for {
-		pfctl := exec.Command("pfctl", "-N", "-R", "-Tload", "-f", "-")
+		pfctl := exec.Command("pfctl", "-N", "-R", "-f", "-")
 		pfctl.Stdin = strings.NewReader(rules)
 		out_bytes, err := pfctl.CombinedOutput()
 		out := string(out_bytes)
 		if err == nil {
 			break
-		} else if strings.Contains(out, "Device busy") && retries < maxPFRetries {
+		}
+		if strings.Contains(out, "Device busy") && retries < maxPFRetries {
 			// Retry if /dev/pf ioctl returns EBUSY, usually due to concurrent access
 			bo.BackOff(context.Background(), err)
 			retries++
 			continue
 		}
-
-		return fmt.Errorf("pfctl -N -R -Tload -f: %v (%s)", err, strings.TrimSpace(out))
+		return fmt.Errorf("pfctl -N -R -f: %v (%s)", err, strings.TrimSpace(out))
 	}
 	return nil
 }
@@ -218,10 +247,10 @@ func ensurePFAnchorRef(logf logger.Logf) error {
 		return nil // already present
 	}
 
-	err := loadPFMainRuleset(r.logf, scrubRules+newNat+newFilter)
+	err := loadPFMainRuleset(logf, scrubRules+newNat+newFilter)
 	if err == nil {
 		shouldCleanupPfAnchors.Store(true)
-		r.logf("added PF anchors to main ruleset")
+		logf("added PF anchors to main ruleset")
 	}
 	return err
 }
